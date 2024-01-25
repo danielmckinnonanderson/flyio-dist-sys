@@ -1,0 +1,14 @@
+{
+  "name": "maelstrom-unique-ids",
+  "module": "main.ts",
+  "type": "module",
+  "scripts": {
+    "build": "bun build ./main.ts --compile --outfile ~/bin/maelstrom-unique-ids"
+  },
+  "devDependencies": {
+    "bun-types": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
