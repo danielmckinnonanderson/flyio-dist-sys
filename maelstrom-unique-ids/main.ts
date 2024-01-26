@@ -1,8 +1,16 @@
-import "./node";
+import { MsgHandler, Node } from "./node";
 
-Bun.serve({
-  fetch(req) {
-    return new Response("Fuck you buddy!");
-  }
-});
+const echoHandler: MsgHandler = function () {
+  console.log("...");
+};
+
+const n = new Node();
+n.registerHandle("echo", echoHandler);
+
+try {
+  n.run();
+} catch (e: any) {
+  console.error(e);
+  process.exit(1);
+}
 
