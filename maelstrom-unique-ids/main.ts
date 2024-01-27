@@ -1,11 +1,18 @@
-import { MsgHandler, Node } from "./node";
+import { MaelstromMessage, MsgHandler, Node } from "./node";
 
-const echoHandler: MsgHandler = function () {
-  console.log("...");
+const echoHandler: MsgHandler = (msg: MaelstromMessage): void | Error => {
 };
 
 const n = new Node();
-n.registerHandle("echo", echoHandler);
+n.registerHandle("echo", (msg: MaelstromMessage): void | Error => {
+  const replyBody = {
+    ...msg.body
+  };
+
+  replyBody["type"] = "echo_ok";
+
+  // return n.reply(msg, body);
+});
 
 try {
   n.run();

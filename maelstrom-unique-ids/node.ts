@@ -9,9 +9,6 @@ export class Node {
 
   callbacks: Map<number, MsgHandler>;
 
-  input: typeof Bun.stdin = Bun.stdin;
-  output: typeof Bun.stdout = Bun.stdout;
-
   public constructor() {
     this.handlers = new Map();
     this.callbacks = new Map();
@@ -38,14 +35,20 @@ export class Node {
     this.handlers.set(type, fn);
   }
 
-  public run(): void | Error {
-    for (const line in this.input) {
+  public handleInitMsg(msg: any): void | Error {
+    const body = msg;
+  }
 
-      if (!isMaelstromMessage(line)) {
-        return new Error(`Tried to ingest input as message, but couldn't. Line was ${line}.`);
+  public async run(): Promise<void | Error> {
+    for await (const line of console) {
+      const parsed: any = JSON.parse(line);
+      console.info(parsed);
+
+      if (!isMaelstromMessage(parsed)) {
+        return new Error(`Tried to ingest input as message, but couldn't. Input was ${line}.`);
       }
 
-      const message = line as MaelstromMsg; 
+      const message = line as MaelstromMessage;
 
       // Determine handler to use for the received message
       if (message.body !== null && message.body !== undefined 
@@ -63,26 +66,33 @@ export class Node {
           console.log(`Ignoring reply to ${replyingTo}, since it has no callback.`);
           continue;
         }
+
+        // Go implementation uses a goroutine, what is the most idiomatic
+        //  way to handle that for us?
       }
     }
   }
 };
 
-function isMaelstromMessage(value: any): value is MaelstromMsg {
-  // TODO - Make this more robust to ensure strict typing
-  return typeof value === "object"
-    && value !== undefined && value !== null
-    && "src" in value && "dest" in value
-    && "body" in value;
+function isMaelstromMessage(value: any): value is MaelstromMessage {
+  return value !== undefined && value !== null
+    && ("src"  in value && value.src  !== null)
+    && ("dest" in value && value.dest !== null)
+    && ("body" in value && value.body !== null);
 };
 
-export type MsgHandler = (msg: MaelstromMsg) => void;
+export type MsgHandler = (msg: MaelstromMessage) => void | Error;
 
-export type MaelstromMsg = {
+// Message sent from node `src` to node `dest`.
+// Following the go implementation, body is left unparsed as type `any`
+//  so that handler funcs can deal with it.
+export type MaelstromMessage = {
   src?: string;  // Source, the name of the origin cluster
   dest?: string; // Destination, the name of the node
-  body?: MessageBody; // TODO - Update type based on different message types
+  body?: any;    // Unparsed, expect JSON object
 };
+
+export const getMessageType = (msg: MaelstromMessage): string => msg.body?.type ?? "";
 
 export type MessageType = "echo" | "init"; // TODO - Add types
 
