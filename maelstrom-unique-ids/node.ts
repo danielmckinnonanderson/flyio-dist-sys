@@ -1,3 +1,4 @@
+
 // Maelstrom Node specification
 // https://github.com/jepsen-io/maelstrom/blob/main/doc/protocol.md
 export class Node {
@@ -6,8 +7,9 @@ export class Node {
   nextMsgId: number | null = null;
 
   handlers: Map<MessageType, MsgHandler>;
-
   callbacks: Map<number, MsgHandler>;
+
+  stdout = Bun.stdout.writer();
 
   public constructor() {
     this.handlers = new Map();
@@ -35,14 +37,65 @@ export class Node {
     this.handlers.set(type, fn);
   }
 
-  public handleInitMsg(msg: any): void | Error {
-    const body = msg;
+  // Default handler for init messages.
+  // Parse the message body and initialize self according to its parameters.
+  public handleInitMsg(msg: MaelstromMessage): void | Error {
+    const body: InitMsgBody = msg.body;
+    if (body === null || body === undefined) {
+      return new Error(`I was assured that the body for init message would be present, but it wasn't. Body was ${body}`);
+    }
+    if (body.node_id === undefined || body.node_id === null) {
+      return new Error(`Init message body did not provide a 'node_id', instead 'node_id' was ${body.node_id}`);
+    }
+    if (body.node_ids === undefined || body.node_ids === null) {
+      return new Error(`Init message body did not provide 'node_ids', instead 'node_ids' was ${body.node_id}`);
+    }
+
+    this.initialize(body.node_id, body.node_ids);
+
+    // If application has provided a handler override for init, use that.
+    if (this.handlers.has("init")) {
+      const result: void | Error = this.handlers.get("init")!(msg);
+      if (result instanceof Error) {
+        return result as Error;
+      }
+    }
+
+    // Send response that this node has been initialized successfully
+    // console.log(`Node ${this.id} is initialized`);
+    return this.reply(msg, { type: "init_ok" });
+  }
+
+  // Reply to the given message with a response body
+  public reply(request: MaelstromMessage, body: any): void | Error {
+    const reqBody: MessageBody = request.body;
+    if (request.src === null || request.src === undefined) {
+      return new Error(`Tried to reply to message with ID ${reqBody.msg_id}, but it didn't have a source. Source was ${request.src}`);
+    }
+    
+    const respBody: MessageBody = body;
+    respBody["in_reply_to"] = reqBody.msg_id;
+
+    return this.send(request.src, respBody);
+  }
+
+  public send(destination: string, body: any): void | Error {
+    const outgoing: MaelstromMessage = {
+      src: this.id!,
+      dest: destination,
+      body: body,
+    };
+
+    try {
+      this.stdout.write(JSON.stringify(outgoing) + "\n");
+    } catch (error: any) {
+      return new Error(error);
+    }
   }
 
   public async run(): Promise<void | Error> {
     for await (const line of console) {
       const parsed: any = JSON.parse(line);
-      console.info(parsed);
 
       if (!isMaelstromMessage(parsed)) {
         return new Error(`Tried to ingest input as message, but couldn't. Input was ${line}.`);
@@ -63,7 +116,7 @@ export class Node {
 
         // If no callback exists, log message and continue 
         if (handler === undefined || handler === null) {
-          console.log(`Ignoring reply to ${replyingTo}, since it has no callback.`);
+          // console.log(`Ignoring reply to ${replyingTo}, since it has no callback.`);
           continue;
         }
 
@@ -104,8 +157,14 @@ export type MessageBody = {
   text?: string; // Error message, or none if no error occurred
 };
 
-export type EchoMsgBody = {
-  type?: "echo";
+export type InitMsgBody = MessageBody & {
+  type: "init"
+  node_id?: string;
+  node_ids?: string[];
+};
+
+export type EchoMsgBody = MessageBody & {
+  type: "echo";
   msg_id?: number;
   echo?: string;
 };

@@ -1,9 +1,7 @@
-import { MaelstromMessage, MsgHandler, Node } from "./node";
-
-const echoHandler: MsgHandler = (msg: MaelstromMessage): void | Error => {
-};
+import { MaelstromMessage, Node } from "./node";
 
 const n = new Node();
+
 n.registerHandle("echo", (msg: MaelstromMessage): void | Error => {
   const replyBody = {
     ...msg.body
@@ -11,7 +9,7 @@ n.registerHandle("echo", (msg: MaelstromMessage): void | Error => {
 
   replyBody["type"] = "echo_ok";
 
-  // return n.reply(msg, body);
+  return n.reply(msg, replyBody);
 });
 
 try {
