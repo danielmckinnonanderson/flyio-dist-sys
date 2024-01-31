@@ -1,19 +1,24 @@
+import { FileSink } from "bun";
 
 // Maelstrom Node specification
 // https://github.com/jepsen-io/maelstrom/blob/main/doc/protocol.md
 export class Node {
-  id: string | null = null;
-  nodeIds: string[] | null = null;
+  id: NodeId | null = null;
+  nodeIds: NodeId[] | null = null;
   nextMsgId: number | null = null;
 
   handlers: Map<MessageType, MsgHandler> = new Map();
-  callbacks: Map<number, MsgHandler> = new Map();
 
-  private output = Bun.stdout.writer();
+  private input: AsyncIterable<string> = console;
+  private output: FileSink = Bun.stdout.writer();
 
-  public constructor() {}
+  public constructor(input?: AsyncIterable<string>, output?: FileSink) {
+    // For testing
+    if (input) this.input = input;
+    if (output) this.output = output;
+  }
 
-  public initialize(id: string, nodeIds: string[]): void {
+  public initialize(id: NodeId, nodeIds: NodeId[]): void {
     this.id = id;
     this.nodeIds = nodeIds;
   }
@@ -75,20 +80,9 @@ export class Node {
     if (request.src === null || request.src === undefined) {
       return new Error(`Tried to reply to message with ID ${reqBody.msg_id}, but it didn't have a source. Source was ${request.src}`);
     }
-
-    
-    if (body instanceof Error) {
-      // FIXME
-      return this.send(request.src, {});
-    } else {
-      const respBody: MessageBody = body;
-      respBody["in_reply_to"] = reqBody.msg_id;
-
-      return this.send(request.src, respBody);
-    }
   }
 
-  public async send(destination: string, body: any): Promise<void | Error> {
+  public async send(destination: NodeId, body: any): Promise<void | Error> {
     const outgoing: MaelstromMessage = {
       src: this.id!,
       dest: destination,
@@ -103,7 +97,7 @@ export class Node {
   }
 
   public async run(): Promise<void | Error> {
-    for await (const line of console) {
+    for await (const line of this.input) {
       const parsed: any = JSON.parse(line);
 
       if (!isMaelstromMessage(parsed)) {
@@ -126,15 +120,15 @@ export class Node {
         const replyingTo = message.body.in_reply_to;
 
         // Extract callback if replying to previous message
-        const handler = this.callbacks.get(replyingTo);
-        if (handler === undefined) {
-          // If no callback exists, log message and continue 
-          // TODO - Log "Ignoring reply to ${replyingTo} with no callback"
-          continue;
-        }
+        // const handler = this.callbacks.get(replyingTo);
+        // if (handler === undefined) {
+        //   // If no callback exists, log message and continue 
+        //   // TODO - Log "Ignoring reply to ${replyingTo} with no callback"
+        //   continue;
+        // }
         // Callback exists, handle it and then delete it
-        this.callbacks.delete(replyingTo);
-        this.handleCallback(handler, message);
+        // this.callbacks.delete(replyingTo);
+        // this.handleCallback(handler, message);
 
       }
 
@@ -151,10 +145,6 @@ export class Node {
     }
   }
 
-  public async handleCallback(handler: MsgHandler, msg: MaelstromMessage): Promise<void | Error> {
-    return handler(msg);
-  }
-
   public async handleMessage(handler: MsgHandler, msg: MaelstromMessage): Promise<void | Error> {
     const result = await handler(msg);
 
@@ -167,8 +157,7 @@ export class Node {
 export function isMaelstromMessage(value: any): value is MaelstromMessage {
   return value !== undefined && value !== null
     && ("src"  in value && value.src  !== null)
-    && ("dest" in value && value.dest !== null)
-    && ("body" in value && value.body !== null);
+    && ("dest" in value && value.dest !== null) && ("body" in value && value.body !== null);
 }
 
 export function isInitMessageBody(value: any): value is InitMsgBody {
@@ -189,14 +178,17 @@ export type MsgHandler = (msg: MaelstromMessage) => Promise<void | Error>;
 // Following the go implementation, body is left unparsed as type `any`
 //  so that handler funcs can deal with it.
 export type MaelstromMessage = {
-  src?: string;  // Source, the name of the origin cluster
-  dest?: string; // Destination, the name of the node
-  body?: EchoMsgBody | InitMsgBody;    // Unparsed, expect JSON object
+  src?: NodeId;  // Source, the ID of the origin node
+  dest?: NodeId; // Destination, the ID of the node
+  body?: EchoMsgBody | InitMsgBody; // Unparsed, expect JSON object
 };
+
 export const getMessageType = (msg: MaelstromMessage): MessageType | null => msg.body?.type ?? null;
+
 export type MessageType = "error" | "echo" | "init" | "init_ok"; // TODO - Add other types
 export type MessageId = number;
-export type NodeId = string;
+export type NodeId = `n${number}`; // Example "n1", "n2"
+export type ClusterId = `c${number}`; // Example "c1", "c2"
 
 export type MessageBody = {
   type: MessageType; // Type of message
@@ -208,8 +200,8 @@ export type MessageBody = {
 
 export type InitMsgBody = MessageBody & {
   type: "init"
-  node_id?: NodeId; // ID of this node, example "n3"
-  node_ids?: NodeId[]; // IDs of the other nodes in the cluster, example ["n1", "n2"]
+  node_id: NodeId; // ID of this node, example "n3"
+  node_ids: NodeId[]; // IDs of all nodes in the cluster including this one. Example ["n1", "n2", "n3"]
 };
 
 export type EchoMsgBody = MessageBody & {
