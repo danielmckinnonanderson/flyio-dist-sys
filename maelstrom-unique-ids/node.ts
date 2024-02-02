@@ -1,13 +1,14 @@
 import { FileSink } from "bun";
 
-// Maelstrom Node specification
-// https://github.com/jepsen-io/maelstrom/blob/main/doc/protocol.md
+/// Maelstrom Node specification
+/// https://github.com/jepsen-io/maelstrom/blob/main/doc/protocol.md
 export class Node {
-  id: NodeId | null = null;
-  nodeIds: NodeId[] | null = null;
-  nextMsgId: number | null = null;
+  id: NodeId | null = null;        // This node's ID, which is unique in its cluster.
+  nodeIds: NodeId[] | null = null; // All nodes in the cluster, including this one.
+  nextMsgId: MessageId = 0;        // Message ID's are unique on the node that sent them.
 
   handlers: Map<MessageType, MsgHandler> = new Map();
+  callbacks: Map<MessageId, MsgHandler> = new Map();
 
   private input: AsyncIterable<string> = console;
   private output: FileSink = Bun.stdout.writer();
@@ -18,18 +19,12 @@ export class Node {
     if (output) this.output = output;
   }
 
+
   public initialize(id: NodeId, nodeIds: NodeId[]): void {
     this.id = id;
     this.nodeIds = nodeIds;
   }
 
-  public getId(): typeof this.id {
-    return this.id;
-  }
-
-  public getNodeIds(): typeof this.nodeIds {
-    return this.nodeIds;
-  }
 
   public registerHandle(type: MessageType, fn: MsgHandler): void | Error {
     if (this.handlers.has(type)) {
@@ -39,9 +34,32 @@ export class Node {
     this.handlers.set(type, fn);
   }
 
-  // Default handler for init messages.
-  // Parse the message body and initialize self according to its parameters.
-  public async handleInitMsg(msg: MaelstromMessage): Promise<void | Error> {
+
+  /// Send a message response to its callback handler. Log an error if one occurs.
+  public async handleCallback(handler: MsgHandler, msg: MaelstromMsg): Promise<void | Error> {
+    const result = await handler(msg);
+
+    // TODO - Could probably do a bit better for the error handling here.
+    if (result instanceof Error) {
+      console.error(`Callback error, error was ${result.message}`);
+      return result as Error;
+    }
+  }
+
+  /// Send a message to its handler. Send an RPC error if one occurs.
+  public async handleMessage(handler: MsgHandler, msg: MaelstromMsg): Promise<void | Error> {
+    const result = await handler(msg);
+
+    if (result instanceof Error) {
+      // TODO - Send RPC error here
+      // return result as Error;
+    }
+  }
+
+
+  /// Default handler for init messages.
+  /// Parse the message body and initialize self according to its parameters.
+  public async handleInitMsg(msg: MaelstromMsg): Promise<void | Error> {
     if (msg.body === null || msg.body === undefined) {
       return new Error(`I was assured that the body for init message would be present, but it wasn't. Body was ${msg.body}`);
     }
@@ -59,6 +77,7 @@ export class Node {
       return new Error(`Init message body did not provide 'node_ids', instead 'node_ids' was ${body.node_id}`);
     }
 
+    // Initialize self
     this.initialize(body.node_id, body.node_ids);
 
     // If application has provided a handler override for init, use that.
@@ -69,95 +88,131 @@ export class Node {
       }
     }
 
-    // Send response that this node has been initialized successfully
-    return this.reply(msg, { type: "init_ok" });
-  }
-
-  // Reply to the given message with a response body
-  public async reply(request: MaelstromMessage, body: MessageBody | Error): Promise<void | Error> {
-    const reqBody: MessageBody = request.body!;
-
-    if (request.src === null || request.src === undefined) {
-      return new Error(`Tried to reply to message with ID ${reqBody.msg_id}, but it didn't have a source. Source was ${request.src}`);
-    }
-  }
-
-  public async send(destination: NodeId, body: any): Promise<void | Error> {
-    const outgoing: MaelstromMessage = {
-      src: this.id!,
-      dest: destination,
-      body: body,
+    // Finally, reply and indicate that we initialized successfully.
+    const replyBody: MessageBody = {
+      type: "init_ok"
     };
 
-    try {
-      this.output.write(JSON.stringify(outgoing) + "\n");
-    } catch (error: any) {
-      return new Error(error);
-    }
+    await this.replyToMsg(msg, replyBody);
   }
+
+
+  public async send(destination: NodeId, body: any): Promise<void | Error> {
+    if (this.id === null) {
+      return Error(`Tried to send a message, but we haven't been initialized yet. Our ID is 'null'.`);
+    }
+
+    const respBody: MaelstromMsg = {
+      src: this.id,
+      dest: destination,
+      body: body
+    };
+
+    this.output.write(JSON.stringify(respBody));
+    this.output.write("\n");
+  }
+
+
+  /// Reply to a request with the given response body
+  public async replyToMsg(replyingTo: MaelstromMsg, withBody: MessageBody): Promise<void | Error> {
+    if (replyingTo.body && "msg_id" in replyingTo.body) {
+      const replyToMsgId: number = replyingTo.body.msg_id;
+
+      const replyBody = {
+        ...withBody,
+        in_reply_to: replyToMsgId
+      };
+
+      if (replyingTo.src === null || replyingTo.src === undefined) {
+        return new Error(`Tried to reply to message ${replyingTo} but it doesn't have a 'src' so we can't.`);
+      }
+
+      return this.send(replyingTo.src, replyBody);
+    } 
+    
+    // Otherwise, no body or no msg_id in request so we can't reply to it.
+    return new Error(`Tried to reply to message ${replyingTo} but its body has no 'msg_id' so we can't.`);
+  }
+
+
+  public async RPC(destination: NodeId, body: any, handler: MsgHandler): Promise<void | Error> {
+    // Increment next message ID
+    this.nextMsgId += 1;
+    const msgId = this.nextMsgId;
+
+    this.callbacks.set(msgId, handler);
+    body = {
+      ...body,
+      msg_id: msgId
+    }
+
+    return this.send(destination, body);
+  }
+
 
   public async run(): Promise<void | Error> {
     for await (const line of this.input) {
-      const parsed: any = JSON.parse(line);
-
-      if (!isMaelstromMessage(parsed)) {
-        // TODO - Log error and then continue rather than erroring out
-        return new Error(`Tried to ingest input as message, but couldn't. Input was ${line}.`);
+      const incoming: any = JSON.parse(line);
+      if (!isMaelstromMessage(incoming)) {
+        // TODO - Check the protocol docs to see if it is appropriate to respond
+        //  with an error from our MaelstromError codes here.
+        console.error(`Read a JSON message from stdin, but it did not conform to expected protocol structure.`);
+        continue;
       }
 
-      const message = parsed as MaelstromMessage;
+      const incomingMessage = incoming as MaelstromMsg;
+      const msgType: MessageType | null = getMessageType(incomingMessage);
+      
+      // If incoming body is in reply to another message, it is a callback.
+      if ("in_reply_to" in incomingMessage.body && Number.isInteger(incomingMessage.body.in_reply_to)) {
+        // Extract callback
+        const callback: MsgHandler | undefined = this.callbacks.get(incomingMessage.body.in_reply_to);
 
-      if (message.body === null || message.body === undefined) {
-        // TODO - Log error and then continue rather than erroring out
-        return new Error(`Message body was not present, body was ${message.body}`);
+        if (!callback) {
+          // No callback exists, log the message and skip.
+          console.error(`Ignoring reply to ${incomingMessage.body.in_reply_to}, since we don't have a callback for it.`);
+          continue;
+        } else {
+          // We have a callback, so call its handler, remove the callback from our map, and move on.
+          this.handleCallback(callback, incomingMessage);
+          this.callbacks.delete(incomingMessage.body.in_reply_to);
+          continue;
+        }
       }
 
-      // Determine handler to use for the received message
-      if (message.body !== null && message.body !== undefined 
-      && message.body.in_reply_to !== null && message.body.in_reply_to !== undefined 
-      && message.body.in_reply_to !== 0) {
-        // Save myself some typing
-        const replyingTo = message.body.in_reply_to;
-
-        // Extract callback if replying to previous message
-        // const handler = this.callbacks.get(replyingTo);
-        // if (handler === undefined) {
-        //   // If no callback exists, log message and continue 
-        //   // TODO - Log "Ignoring reply to ${replyingTo} with no callback"
-        //   continue;
-        // }
-        // Callback exists, handle it and then delete it
-        // this.callbacks.delete(replyingTo);
-        // this.handleCallback(handler, message);
-
+      // Incoming body is not a callback, so we expect its type to have a registered handler.
+      if (msgType === null) {
+        console.error(`Incoming message did not have a type. Continuing...`);
+        continue;
       }
 
-      // Not a callback. Ensure a handler is registered for the given type
-      const handler = message.body.type === "init"
-        ? this.handleInitMsg
-        : this.handlers.get(message.body.type);
+      let handler: MsgHandler | undefined = undefined;
 
-      if (handler === null || handler === undefined) {
-        return new Error(`Didn't have a handler registered for message type ${message.body.type}`);
+      if (incomingMessage.body && "type" in incomingMessage.body && incomingMessage.body.type === "init") {
+        // Message body is of type "init", so use the default handler for that.
+        handler = this.handleInitMsg;
+      } else {
+        // Otherwise, check our handlers for the given message body's type.
+        // If our map of handlers does not have an entry for the key 'msgType', handler will be set to 'undefined'.
+        handler = this.handlers.get(msgType);
       }
 
-      this.handleMessage(handler, message);
-    }
-  }
+      if (!handler) {
+        console.error(`Received a message of type ${msgType} but did not have a handler for it. Continuing...`);
+        continue;
+      }
 
-  public async handleMessage(handler: MsgHandler, msg: MaelstromMessage): Promise<void | Error> {
-    const result = await handler(msg);
-
-    if (result instanceof Error) {
-      return this.reply(msg, result);
+      // Finally, handle the message.
+      this.handleMessage(handler, incomingMessage);
     }
   }
 };
 
-export function isMaelstromMessage(value: any): value is MaelstromMessage {
+export function isMaelstromMessage(value: any): value is MaelstromMsg {
   return value !== undefined && value !== null
     && ("src"  in value && value.src  !== null)
-    && ("dest" in value && value.dest !== null) && ("body" in value && value.body !== null);
+    && ("dest" in value && value.dest !== null)
+    && ("body" in value && value.body !== null);
 }
 
 export function isInitMessageBody(value: any): value is InitMsgBody {
@@ -172,18 +227,25 @@ export function isEchoMessageBody(value: any): value is EchoMsgBody {
   throw new Error("TODO - Not implemented");
 }
 
-export type MsgHandler = (msg: MaelstromMessage) => Promise<void | Error>;
+export type MsgHandler = (msg: MaelstromMsg) => Promise<void | Error>;
 
 // Message sent from node `src` to node `dest`.
 // Following the go implementation, body is left unparsed as type `any`
 //  so that handler funcs can deal with it.
-export type MaelstromMessage = {
+export type MaelstromMsg = {
   src?: NodeId;  // Source, the ID of the origin node
   dest?: NodeId; // Destination, the ID of the node
-  body?: EchoMsgBody | InitMsgBody; // Unparsed, expect JSON object
+  body?: any; // Unparsed, expect JSON object
 };
 
-export const getMessageType = (msg: MaelstromMessage): MessageType | null => msg.body?.type ?? null;
+// Our messages, where we can guarantee that our fields will be defined.
+export type MaelstromMsgOutgoing = {
+  src: NodeId; // Will always be `this` node.
+  dest: NodeId;
+  body: MessageBody | InitMsgBody | EchoMsgBody;
+};
+
+export const getMessageType = (msg: MaelstromMsg): MessageType | null => msg.body?.type ?? null;
 
 export type MessageType = "error" | "echo" | "init" | "init_ok"; // TODO - Add other types
 export type MessageId = number;
