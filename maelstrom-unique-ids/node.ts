@@ -1,4 +1,4 @@
-import { FileSink } from "bun";
+import { BunFile, FileSink } from "bun";
 
 /// Maelstrom Node specification
 /// https://github.com/jepsen-io/maelstrom/blob/main/doc/protocol.md
@@ -26,8 +26,7 @@ export class Node {
   }
 
 
-  public registerHandle(type: MessageType, fn: MsgHandler): void | Error {
-    if (this.handlers.has(type)) {
+  public registerHandle(type: MessageType, fn: MsgHandler): void | Error { if (this.handlers.has(type)) {
       return new Error(`Tried to register a duplicate handler. Already had handler for ${type}.`);
     }
 
@@ -45,6 +44,7 @@ export class Node {
       return result as Error;
     }
   }
+
 
   /// Send a message to its handler. Send an RPC error if one occurs.
   public async handleMessage(handler: MsgHandler, msg: MaelstromMsg): Promise<void | Error> {
@@ -110,6 +110,7 @@ export class Node {
 
     this.output.write(JSON.stringify(respBody));
     this.output.write("\n");
+    await this.output.flush();
   }
 
 
@@ -223,10 +224,6 @@ export function isInitMessageBody(value: any): value is InitMsgBody {
     && ("msg_id"   in value && value.msd_id !== null && value.msg_id !== undefined);
 }
 
-export function isEchoMessageBody(value: any): value is EchoMsgBody {
-  throw new Error("TODO - Not implemented");
-}
-
 export type MsgHandler = (msg: MaelstromMsg) => Promise<void | Error>;
 
 // Message sent from node `src` to node `dest`.
@@ -238,16 +235,15 @@ export type MaelstromMsg = {
   body?: any; // Unparsed, expect JSON object
 };
 
-// Our messages, where we can guarantee that our fields will be defined.
-export type MaelstromMsgOutgoing = {
-  src: NodeId; // Will always be `this` node.
-  dest: NodeId;
-  body: MessageBody | InitMsgBody | EchoMsgBody;
-};
-
 export const getMessageType = (msg: MaelstromMsg): MessageType | null => msg.body?.type ?? null;
 
-export type MessageType = "error" | "echo" | "init" | "init_ok"; // TODO - Add other types
+export type MessageType = 
+  | "error"
+  | "echo"
+  | "echo_ok"
+  | "init"
+  | "init_ok";
+
 export type MessageId = number;
 export type NodeId = `n${number}`; // Example "n1", "n2"
 export type ClusterId = `c${number}`; // Example "c1", "c2"
@@ -273,7 +269,8 @@ export type EchoMsgBody = MessageBody & {
 };
 
 // See https://github.com/jepsen-io/maelstrom/blob/main/doc/protocol.md#errors
-export type MaelstromError =
+export type MaelstromError = Error & MaelstromErrorCode;
+export type MaelstromErrorCode =
   | { code:  0, name: "timeout" }
   | { code:  1, name: "node-not-found" }
   | { code: 10, name: "not-supported" }

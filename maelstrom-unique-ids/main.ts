@@ -1,15 +1,15 @@
-import { MaelstromMessage, Node } from "./node";
+import { MaelstromMsg, Node } from "./node";
 
 const n = new Node();
 
-n.registerHandle("echo", (msg: MaelstromMessage): void | Error => {
+n.registerHandle("echo", async (msg: MaelstromMsg): Promise<void | Error> => {
   const replyBody = {
     ...msg.body
   };
 
   replyBody["type"] = "echo_ok";
 
-  return n.reply(msg, replyBody);
+  return await n.replyToMsg(msg, replyBody);
 });
 
 try {
